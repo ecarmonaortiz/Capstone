@@ -1,0 +1,81 @@
+
+setenv('key', 'sk-b5477d92aaec47649c442c44d0157b9b'); 
+apiKey = getenv("key");
+if strlength(apiKey) == 0
+    error("RuntimeError: env var 'key' is missing.");
+end
+
+TAMU_BASE = "https://chat-api.tamu.ai";
+CHAT_URL  = TAMU_BASE + "/openai/chat/completions?bypass_filter=true";
+MODEL     = "protected.o4-mini";
+
+payload = struct( ...
+    "model", MODEL, ...
+    "messages", { { ...
+        struct("role","system","content","generate a code to find the number of vowels in a word"), ...
+        struct("role","user","content","") ...
+    } }, ...
+    "stream", true ...
+);
+
+jsonBody = jsonencode(payload);
+
+import java.net.URL
+import javax.net.ssl.HttpsURLConnection
+import java.io.*
+
+% Open connection
+u = URL(CHAT_URL);
+conn = u.openConnection();
+conn.setRequestMethod("POST");
+conn.setDoOutput(true);
+conn.setRequestProperty("Authorization", "Bearer " + apiKey);
+conn.setRequestProperty("Content-Type", "application/json");
+conn.setRequestProperty("Accept", "text/event-stream");
+
+% Write JSON body
+osw = OutputStreamWriter(conn.getOutputStream(), "UTF-8");
+osw.write(jsonBody);
+osw.flush();
+osw.close();
+
+% Read stream line-by-line (SSE: "data: {...}" chunks)
+is = conn.getInputStream();
+reader = BufferedReader(InputStreamReader(is, "UTF-8"));
+
+fprintf("\nAssistant (streaming): ");
+while true
+    line = char(reader.readLine());
+    if isempty(line)
+        % keep looping; empty lines separate events
+        continue;
+    end
+
+    % End of stream?
+    if strncmp(line, "data: ", 6)
+        dataStr = strtrim(extractAfter(line, 6));
+        if strcmp(dataStr, "[DONE]")
+            break;
+        end
+
+        % Parse the JSON chunk and print delta content if present
+        try
+            chunk = jsondecode(dataStr); % => struct in MATLAB
+            if isfield(chunk, "choices") && ~isempty(chunk.choices)
+                delta = chunk.choices(1).delta;
+                if isfield(delta, "content") && ~isempty(delta.content)
+                    fprintf("%s", delta.content); % no newline; live typing
+                end
+            end
+        catch ME
+            % If the chunk isn't valid JSON (rare), you can inspect it:
+            % fprintf("\n[Parse error] %s\n", dataStr);
+        end
+    end
+end
+
+fprintf("\n"); % newline at end
+
+reader.close();
+is.close();
+conn.disconnect();
