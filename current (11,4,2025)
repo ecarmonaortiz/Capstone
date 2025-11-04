@@ -1,0 +1,227 @@
+function [outFile, codeText] = project_403_api_call(codeRequest,outFile,varargin)
+
+p = inputParser;
+addRequired(p, 'codeRequest', @(s)isstring(s) || ischar(s));
+addRequired(p, 'outFile',     @(s)isstring(s) || ischar(s));
+addParameter(p, 'ApiKey',       getenv("key"), @(s)isstring(s) || ischar(s));
+addParameter(p, 'BaseUrl',      "https://chat-api.tamu.ai", @(s)isstring(s) || ischar(s));
+addParameter(p, 'Model',        "protected.o4-mini", @(s)isstring(s) || ischar(s));
+addParameter(p, 'SystemPrompt', "Return only runnable code. No explanations.", @(s)isstring(s) || ischar(s));
+addParameter(p, 'LanguageHint', "", @(s)isstring(s) || ischar(s));
+parse(p, codeRequest, outFile, varargin{:});
+
+apiKey   = string(p.Results.ApiKey);
+baseUrl  = string(p.Results.BaseUrl);
+model    = string(p.Results.Model);
+sysMsg   = string(p.Results.SystemPrompt);
+langHint = strtrim(string(p.Results.LanguageHint));
+
+if strlength(apiKey) == 0
+    error("RuntimeError: env var 'key' is missing.");
+end
+
+chatUrl = baseUrl + "/openai/chat/completions"; % safer without extra query parts
+
+if strlength(langHint) > 0
+    sysMsg = sysMsg + " Output must be " + langHint + ".";
+end
+
+payload = struct( ...
+    "model", model, ...
+    "messages", { { ...
+        struct("role","system","content",sysMsg), ...
+        struct("role","user","content",string(codeRequest)) ...
+    } }, ...
+    "stream", false ...
+);
+
+jsonBody = jsonencode(payload);
+
+import java.net.URL
+import javax.net.ssl.HttpsURLConnection
+import java.io.*
+
+% --- Open connection
+u = URL(chatUrl);
+conn = u.openConnection();
+conn.setRequestMethod("POST");
+conn.setDoOutput(true);
+conn.setRequestProperty("Authorization", "Bearer " + apiKey);
+conn.setRequestProperty("Content-Type", "application/json");
+conn.setRequestProperty("Accept", "*/*");  % be liberal; we'll parse defensively
+conn.setConnectTimeout(15000);
+conn.setReadTimeout(60000);
+
+% --- Write body
+osw = OutputStreamWriter(conn.getOutputStream(), "UTF-8");
+osw.write(jsonBody);
+osw.flush();
+osw.close();
+
+% --- Read status and body
+status = conn.getResponseCode();
+ctype  = string(conn.getHeaderField("Content-Type"));
+
+if status >= 200 && status < 300
+    is = conn.getInputStream();
+else
+    is = conn.getErrorStream();
+    if isempty(is)
+        error("HTTP %d (no body)", status);
+    end
+end
+
+reader = BufferedReader(InputStreamReader(is, "UTF-8"));
+sb = java.lang.StringBuilder();
+line = reader.readLine();
+while ~isempty(line) % null => []
+    sb.append(line);
+    sb.append('\n');
+    line = reader.readLine();
+end
+reader.close();
+is.close();
+conn.disconnect();
+
+respTxt = string(char(sb.toString()));
+
+if status < 200 || status >= 300
+    error("HTTP %d error:\n%s", status, respTxt);
+end
+
+% --- Try robust extraction of the assistant text
+[ok, rawText] = tryExtractAssistantText(respTxt, ctype);
+if ~ok
+    % As a last resort, try to carve out the last balanced {...} and decode that
+    candidate = extractLastJSONObject(respTxt);
+    try
+        resp = jsondecode(candidate);
+        if isfield(resp, "choices") && ~isempty(resp.choices)
+            if isfield(resp.choices(1), "message") && isfield(resp.choices(1).message, "content")
+                rawText = string(resp.choices(1).message.content);
+                ok = true;
+            elseif isfield(resp.choices(1), "text")
+                rawText = string(resp.choices(1).text);
+                ok = true;
+            end
+        end
+    catch
+        % still not OK
+    end
+end
+
+if ~ok
+    % Helpful dump for debugging when needed
+    error("Could not parse response as JSON or SSE.\nFirst 500 chars:\n%s", respTxt(1:min(500,strlength(respTxt))));
+end
+
+% ---- Strip markdown code fences if present
+codeText = stripCodeFences(rawText);
+
+% ---- Ensure output folder exists, then write file
+outFile = string(outFile);
+outDir  = fileparts(outFile);
+if strlength(outDir) > 0 && ~exist(outDir, 'dir')
+    mkdir(outDir);
+end
+
+fid = fopen(outFile, 'w', 'n', 'UTF-8');
+if fid == -1
+    error("Could not open output file for writing: %s", outFile);
+end
+cleanup = onCleanup(@() fclose(fid));
+fwrite(fid, codeText, 'char');
+
+fprintf("Wrote %d characters to %s\n", strlength(codeText), outFile);
+end
+
+% ================= helpers =================
+
+function [ok, textOut] = tryExtractAssistantText(respTxt, contentType)
+% 1) Try clean JSON
+ok = false; textOut = "";
+try
+    resp = jsondecode(respTxt);
+    if isfield(resp,"choices") && ~isempty(resp.choices)
+        if isfield(resp.choices(1),"message") && isfield(resp.choices(1).message,"content")
+            textOut = string(resp.choices(1).message.content);
+            ok = true; return;
+        elseif isfield(resp.choices(1),"text")
+            textOut = string(resp.choices(1).text);
+            ok = true; return;
+        end
+    end
+catch
+    % continue
+end
+
+% 2) If Content-Type hints at SSE or the body contains data: lines, parse SSE
+if contains(lower(contentType), "event-stream") || contains(respTxt, "data:")
+    chunks = regexp(respTxt, '(^|\n)\s*data:\s*(.*)\s*(?=\n)', 'tokens');
+    if ~isempty(chunks)
+        buf = strings(0);
+        for k = 1:numel(chunks)
+            dataStr = string(chunks{k}{2});
+            if dataStr == "[DONE]"; continue; end
+            try
+                part = jsondecode(dataStr);
+                % ChatCompletionChunk style
+                if isfield(part,'choices') && ~isempty(part.choices) ...
+                   && isfield(part.choices(1),'delta') ...
+                   && isfield(part.choices(1).delta,'content')
+                    buf(end+1) = string(part.choices(1).delta.content); %#ok<AGROW>
+                % Or a full completion object delivered via SSE
+                elseif isfield(part,'choices') && ~isempty(part.choices) ...
+                       && isfield(part.choices(1),'message') ...
+                       && isfield(part.choices(1).message,'content')
+                    buf(end+1) = string(part.choices(1).message.content); %#ok<AGROW>
+                end
+            catch
+                % ignore malformed lines
+            end
+        end
+        if ~isempty(buf)
+            textOut = join(buf, "");
+            ok = true; return;
+        end
+    end
+end
+end
+
+function s = stripCodeFences(s)
+s = string(s);
+pat = "^\s*```[a-zA-Z0-9_-]*\s*([\s\S]*?)\s*```\s*$";
+tokens = regexp(s,pat,'tokens');
+if ~isempty(tokens)
+    s = string(tokens{1}{1});
+end
+s = strip(s);
+end
+
+function j = extractLastJSONObject(txt)
+% Grab the last balanced {...} block — helps when servers append noise
+txt = char(txt);
+lastClose = find(txt=='}', 1, 'last');
+firstOpen = find(txt(1:lastClose)=='{', 1, 'first');
+if isempty(firstOpen) || isempty(lastClose)
+    j = string(txt);
+else
+    j = string(txt(firstOpen:lastClose));
+end
+end
+
+
+setenv('key', 'sk-b5477d92aaec47649c442c44d0157b9b'); 
+
+[fn, code] = project_403_api_call( ...
+    "Write MATLAB code that defines a function countVowels(s) which returns the number of vowels in the input string.", ...
+    "generated/vowel_counter.m", ...
+    'LanguageHint',"MATLAB");
+
+
+exist("generated/vowel_counter.m","file");
+type generated/vowel_counter.m
+movefile("generated/vowel_counter.m","generated/countVowels.m");
+
+addpath("generated");
+n = countVowels("you")
