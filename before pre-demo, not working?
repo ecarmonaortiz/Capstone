@@ -1,0 +1,570 @@
+setenv('key', 'sk-b5477d92aaec47649c442c44d0157b9b'); 
+
+% Files:  
+pulse = 'request_pulse.json';
+linear = 'request_chirp_linear.json';
+logFile = 'request_chirp_log.json';
+step = 'request_step_frequency.json';
+phase = 'request_phase_coded.json';
+%{
+seq
+B2 = [1,-1]
+B3 = [1,1,-1]
+B4 = [1,1,-1,1] or [1,1,1,-1]
+B5 = [1,1,1,-1,1]
+B7 = [1,1,1,-1,-1,1,-1]
+B11 =[1,1,1,-1,-1,-1,1,-1,-1,1,-1]
+B13 =[1,1,1,1,1,-1,-1,1,1,-1,1,-1,1]
+%}
+
+spec = pulse;
+
+
+% making sure file passed is json file
+if ischar(spec) || isstring(spec)
+    raw = jsondecode(fileread(spec));
+else
+    raw = spec;
+end
+
+
+p = normalize_parameters(raw);
+
+dt = 1/p.fs;                            % time between point
+N = round(p.duration* p.fs);               % number of points
+t = single((0:N-1).' * dt);     % creates time vector 
+fs = p.fs;
+
+
+switch lower(p.type)
+    case 'continuous_pulse'
+        A = single(p.A);
+        w = 2*pi*single(p.pulse.freqHz);
+        ph = single(p.pulse.ph0);
+        PRI = p.pulse.PRI;
+        tau = p.pulse.tau;
+        msg = sprintf( ...
+            "Return only runnable MATLAB code.\n" + ...
+            "Define a function with these parameters:\n" + ...
+            "function iq = continuous_pulse(t, A, w, ph, PRI, tau)\n" + ...
+            "Please make the function create IQ samples for a continous pulse train");
+
+        [fn,code] = project_403_api_call(msg,"generated/continuous_pulse.m",'LanguageHint',"MATLAB");
+        addpath("generated");
+        if ~exist("generated/continuous_pulse.m","file")
+            error("Continuous_pulse.m not created.");
+        end
+
+        % use generated code for Iq
+        iq = continuous_pulse(t, A, w, ph, PRI, tau);
+
+        % test iq
+        carrier = complex(A*cos(w*t+ph),A*sin(w*t+ph));
+
+        CPI = p.duration;
+        Num_pulses = floor(CPI / PRI);
+
+        pulseShape = @(x) rectpuls(x - tau/2,tau);
+        delays = (0:Num_pulses-1)*PRI;
+        y = pulstran(double(t),delays,pulseShape);
+        y = single(y);
+        iq_ref = carrier .*y;
+
+        %writematrix(iq,'iq_data.txt','Delimiter','\t');
+
+        rehash;  
+
+        % ---- Plot
+        tp    = t * 1e3;        
+        
+        figure('Name','IQ Check'); 
+        
+        subplot(2,2,1);
+        plot(tp, real(iq)); grid on;
+        xlabel('Time (ms)'); ylabel('I'); title('In-phase');
+        
+        subplot(2,2,2);
+        plot(tp, imag(iq)); grid on;
+        xlabel('Time (ms)'); ylabel('Q'); title('Quadrature');
+        
+        subplot(2,2,3);
+        plot(tp, abs(iq)); grid on;
+        xlabel('Time (ms)'); ylabel('|IQ|'); title('Magnitude');
+
+        
+        % subplot(2,2,4);
+        % plot(tp, angle(iq)); grid on;
+        % xlabel('Time (ms)'); ylabel('Phase (rad)'); title('Phase');
+
+        subplot(2,2,4)
+        plot(tp, real(iq_ref));grid on;
+        title('reference');
+
+
+
+
+    case 'fm_linear'
+        A = single(p.A);
+        bw = p.linear.bw;
+        center_freq = p.linear.center_freq;
+        T = p.linear.chirpDur;
+        f0 = center_freq - bw/2;
+        W = bw / T;    % chirp rate
+        tt = double(t);
+
+        msg = sprintf( ...
+            "Return only runnable MATLAB code.\n" + ...
+            "Define a function with these parameters:\n" + ...
+            "function iq = fm_linear(tt,A,W,f0,T)\n" + ...
+            "%% tt: seconds (column). A: amplitude. W: chirp rate (Hz/s). f0: start Hz. T: chirp duration (s).\n" + ...
+            "%% Phase-continuous: chirp from f0 to f1=f0+W*T over [0,T], then hold f1 after T.\n" + ...
+            "Please make this function create IQ samples for a Linear FM waveform");
+
+        [fn,code] = project_403_api_call(msg,"generated/fm_linear.m",'LanguageHint',"MATLAB");
+        addpath("generated"); rehash;
+        if ~exist("generated/fm_linear.m","file")
+            error("fm_linear.m not created");
+        end
+
+        % generated iq
+        iq = fm_linear(tt,A,W,f0,T);
+
+        % iq test
+        f1 = center_freq + bw/2;
+        phi_T = 2*pi*(f0*T + 0.5*W*T^2);
+        phi = zeros(size(tt));
+        phi(tt < T) = 2*pi*(f0*tt(tt<T) + 0.5*W*tt(tt<T).^2);
+        phi(tt >= T) = phi_T + 2*pi*f1*(tt(tt >= T) - T);
+
+        y = exp(1j*phi);
+        iq_ref = A*complex(single(real(y)), single(imag(y)));
+
+        rehash;
+        
+        % Plots 
+        tp = t * 1e3;   % ms
+        figure('Name','FM Linear IQ Check (Full Duration)');
+        
+        subplot(2,2,1);
+        plot(tp, real(iq)); grid on;
+        xlabel('Time (ms)'); ylabel('I');
+        title('In-phase'); xlim([tp(1) tp(end)]);
+        
+        subplot(2,2,2);
+        plot(tp, imag(iq)); grid on;
+        xlabel('Time (ms)'); ylabel('Q');
+        title('Quadrature'); xlim([tp(1) tp(end)]);
+        
+        subplot(2,2,3);
+        plot(tp, abs(iq)); grid on; hold on;
+        plot(tp, A*ones(size(tp)), '--');           % constant envelope expected
+        xlabel('Time (ms)'); ylabel('|IQ|');
+        title('Magnitude with expected envelope');
+        legend('|IQ|','A (expected)', 'Location','best'); legend boxoff;
+        xlim([tp(1) tp(end)]);
+        
+        subplot(2,2,4);
+        plot(tp, angle(iq)); grid on;
+        xlabel('Time (ms)'); ylabel('Phase (rad)');
+        title('Phase (full duration)'); xlim([tp(1) tp(end)]);
+        
+        % frequency vs time plot
+        dt      = 1/p.fs;
+        phi     = unwrap(angle(iq));
+        f_inst  = (1/(2*pi)) * gradient(phi) / dt;   % Hz
+        
+        figure('Name','Instantaneous Frequency');
+        plot(tp, f_inst, 'LineWidth', 1); grid on;
+        xlabel('Time (ms)'); ylabel('Frequency (Hz)');
+        title('Frequency');
+
+
+
+    case 'fm_log'
+        A = single(p.A);
+        bw = p.log.bw;
+        center_freq = p.log.center_freq;
+        T = p.log.chirpDur;
+        f0 = center_freq - bw/2;
+        f1 = center_freq + bw/2;
+
+        tt = double(t);
+
+        k = log(f1/f0);
+        msg = sprintf( ...
+            "Return only runnable MATLAB code.\n" + ...
+            "Define a function with these parameters:\n" + ...
+            "function iq = fm_log(tt,A,k,f0,f1,T)\n" + ...
+            "%% tt: seconds (column). A: amplitude. k=log(f1/f0). f0: start Hz. f1: end Hz. T: sweep duration (s).\n" + ...
+            "%% Log-FM: f(t)=f0*exp(k*t/T) for 0<=t<T; phase-continuous; hold f1 after T.\n   " + ...
+            "Please make this function create IQ samples for a log FM waveform");
+
+
+        [fn,code] = project_403_api_call(msg,"generated/fm_log.m",'LanguageHint',"MATLAB");
+        addpath("generated"); rehash;
+        if ~exist("generated/fm_log.m","file")
+            error("fm_log.m not created");
+        end
+
+        % generated iq
+        iq = fm_log(tt,A,k,f0,f1,T);
+
+        % test iq
+        phi = zeros(size(tt));
+        r = f1/f0;
+        idx = (tt < T);
+        if abs(k) < 1e-12
+            phi(idx) = 2*pi*f0 .* tt(idx);
+            phi_T = 2*pi * f0 * T;
+        else
+            phi(idx) = 2*pi * f0 * T / k .*(exp(k * tt(idx)/T) - 1);
+            phi_T = 2*pi * f0 * T / k * (r-1);
+        end
+
+        idx_after = (tt >= T);
+        phi(idx_after) = phi_T + 2*pi * f1 .* (tt(idx_after) - T);
+
+        y = exp(1j*phi);
+        iq_ref = A * complex(single(real(y)), single(imag(y)));
+   
+        rehash;
+
+        % --- Plots (full duration)
+        tp = t * 1e3;   % ms
+        
+        figure('Name','FM Log IQ Check (Full Duration)');
+        
+        subplot(2,2,1);
+        plot(tp, real(iq)); grid on;
+        xlabel('Time (ms)'); ylabel('I');
+        title('In-phase (full duration)'); xlim([tp(1) tp(end)]);
+        
+        subplot(2,2,2);
+        plot(tp, imag(iq)); grid on;
+        xlabel('Time (ms)'); ylabel('Q');
+        title('Quadrature (full duration)'); xlim([tp(1) tp(end)]);
+        
+        subplot(2,2,3);
+        plot(tp, abs(iq)); grid on; hold on;
+        xlabel('Time (ms)'); ylabel('|IQ|');
+        xlim([tp(1) tp(end)]);
+        
+        subplot(2,2,4);
+        plot(tp, angle(iq)); grid on;
+        xlabel('Time (ms)'); ylabel('Phase (rad)');
+        title('Phase (full duration)'); xlim([tp(1) tp(end)]);
+        
+        % --- Instantaneous frequency vs theory (log ramp then flat at f1)
+        dt      = 1/p.fs;
+        phi     = unwrap(angle(iq));
+        f_inst  = (1/(2*pi)) * gradient(phi) / dt;      % Hz
+        
+        figure('Name','FM Log: Instantaneous Frequency');
+        plot(tp, f_inst, 'LineWidth', 1); grid on;
+        xlabel('Time (ms)'); ylabel('Frequency (Hz)');
+        title('Frequency vs time');
+
+
+
+
+    case 'step_frequency'
+        A = single(p.A);
+        f0 = p.step.f0;
+        df = p.step.StepSize;
+        N = p.step.Nsteps;
+        ph0 = p.step.ph0;
+        stepDur = p.step.stepDur;
+
+        tt = double(t);
+
+        msg = sprintf( ...
+            "Return only runnable MATLAB code.\n" + ...
+            "Define a fuction with these parameters:\n" + ...
+            "function iq = step_frequency(tt,A,f0,df,N,ph0,stepDur)\n" + ...
+            "%% tt: seconds (column).A: amplidtude. f0: startig Hz. stepDur: step duration (s).\n" + ...
+            "%% df:change in frequency. N: number of steps.\n" + ...
+            "Please make this function create IQ samples for a step frequency waveform. Make sure you hold the last frequency");
+
+        [fn,code] = project_403_api_call(msg,"generated/step_frequency.m",'LanguageHint',"MATLAB");
+        addpath("generated");
+        if ~exist("generated/step_frequency.m","file")
+            error("step_frequency.m not created");
+        end
+        
+
+        % generated iq
+        iq = step_frequency(tt,A,f0,df,N,ph0,stepDur);
+
+        % test 
+        phi = zeros(size(tt));
+        phi0 = ph0;
+
+        for n = 1:N
+            f_n = f0 + (n-1) *df;
+            tStart = (n-1) * stepDur;
+            tEnd = n * stepDur;
+
+            idx = (tt >= tStart) & (tt < tEnd);
+
+            phi(idx) = phi0 + 2*pi * f_n .*(tt(idx) - tStart);
+
+            phi0 = phi0 + 2*pi * f_n *(tEnd - tStart);
+        end
+        idxAfter = tt >= N * stepDur;
+        if any(idxAfter)
+            fLast = f0 + (N-1)*df;
+            phi(idxAfter) = phi0 + 2*pi * fLast .*(tt(idxAfter) - N*stepDur);
+        end
+
+        y = exp(1j*phi);
+        iq_ref = A * complex(single(real(y)),single(imag(y)));
+        
+        rehash;
+
+        % checking iq
+        tp = t * 1e3;
+        figure('Name','Step-Frequency IQ');
+        subplot(2,2,1); plot(tp, real(iq));grid on;
+        title('I'); 
+        xlim([tp(1) tp(end)]);
+
+        subplot(2,2,2); plot(tp, imag(iq)); grid on;
+        title('Q');
+        xlim([tp(1) tp(end)]);
+
+        subplot(2,2,3); plot(tp, abs(iq)); grid on;
+        title('|IQ|'); 
+        xlim([tp(1) tp(end)]);
+
+        dt = 1/p.fs;
+        phi = unwrap(angle(iq));
+        f_inst = (1/(2*pi))*gradient(phi)/dt;
+        subplot(2,2,4); plot(tp,f_inst); grid on;
+
+        title('f (Hz)'); xlim([tp(1) tp(end)]);
+
+         
+
+    case 'phase_coded'
+        A = single(p.A);
+        chipWidth = double(p.phase.chipWidth);
+         
+        seq = double(p.phase.sequence(:));   % +- 1 stuff
+        ph0 = double(p.phase.startph);  % radians
+        repeat = logical(p.phase.repeat);
+
+     
+        tt = double(t);
+
+        msg = sprintf( ...
+        "Return only runnable MATLAB code.\n" + ...
+        "Define a function with these parameter:\n" + ...
+        "function iq = phase_coded(tt,A,chipWidth,seq,ph0,repeat)\n" + ...
+        "%% tt: seconds (column). A amplitude. chipWidth: seconds per chip. seq = +/-1 chips. ph0 rad. repeat true/false.\n" + ...
+        "Please make the function create IQ samples of the phase coded waveform");
+
+
+        
+
+        [fn,code] = project_403_api_call(msg,"generated/phase_coded.m",'LanguageHint',"MATLAB");
+        addpath("generated");rehash;
+        if ~exist("generated/phase_coded.m","file")
+            error("phase_coded.m not created");
+        end
+        
+
+        iq = phase_coded(tt,A,chipWidth,seq,ph0,repeat);
+
+
+        % test
+        tt = tt(:);
+        N = numel(tt);
+        M = numel(seq);
+        iq_ref = zeros(N,1);
+        if repeat
+            idx = mod(floor(tt/chipWidth),M)+1;
+            phi = ph0 + ((1-seq(idx))/2)*pi;
+            iq_ref = A*exp(1j*phi);
+        else
+            idx = floor(tt/chipWidth)+1;
+            valid = idx>=1 & idx<=M;
+            phi = ph0 + ((1-seq(idx(valid)))/2)*pi;
+            iq_ref(valid) = A*exp(1j*phi);
+        end
+
+        rehash;
+
+        % iq check
+        tp = t*1e3;
+
+        figure('Name','Phase-coded IQ check');
+
+        subplot(2,2,1);
+        plot(tp,real(iq)); grid on;
+        xlabel('Time (ms)'); ylabel('I');
+        title('In-phase'); xlim([tp(1) tp(end)]);
+
+        subplot(2,2,2);
+        plot(tp,imag(iq)); grid on;
+        xlabel('Time (ms)'); ylabel('Q');
+        title('Quadrature'); xlim([tp(1), tp(end)]);
+
+        subplot(2,2,3);
+        plot(tp,abs(iq)); grid on;
+        xlabel('Time (ms)'); ylabel('|IQ|');
+        title('magnitude'); xlim([tp(1) tp(end)]);
+
+        subplot(2,2,4);
+        phu = unwrap(angle(iq));
+        plot(tp, phu); grid on;
+        xlabel('Time (ms)'); ylabel('phase (rad)');
+        title('Phase'); xlim([tp(1) tp(end)]);
+
+        figure('Name','Phase-coded chip boudaries');
+        plot(tp,real(iq)); grid on; hold on;
+        xlabel("Time (ms)"); ylabel('I'); 
+        title('Phase-coded waveform');
+        chipEdges = find(diff(floor(tt/chipWidth))~=0) + 1;
+
+
+
+    otherwise
+        error('Unsupported type: %s', p.type);
+end
+
+maxerr = max(abs(iq - iq_ref));
+fprintf("generated vs reference = %.3g\n", maxerr);
+
+tol = 100* eps('single') * max(abs(iq_ref));
+
+if maxerr < tol
+    fprintf("PASS: maxerr = %.3g < tol = %.3g\n", maxerr, tol);
+else
+    fprintf("FAIL: maxerr = %.3g >= tol = %.3g\n", maxerr, tol);
+end
+
+
+
+
+% helpers
+function v = getf(s,f,d)
+% s is the struct
+% f is the field
+% d is the default
+if nargin < 3
+    d = [];   % if no default is provided, its empty
+end
+if isstruct(s) && isfield(s,f) && ~isempty(s.(f))
+    v = s.(f);
+else
+    v = d;    % if  something is missing, use default
+end
+
+end
+
+
+function p = normalize_parameters(r)
+p.type = getf(r,'type');
+p.type = strrep(p.type,'-','_');
+p.fs = getf(r,'sampleRateHz',2e6);
+p.duration = getf(r,'durationSec',0.01);
+p.A = getf(r,'amplitude',0.8);
+
+switch lower(p.type)
+    case 'continuous_pulse'
+        if isfield(r,'pulse') && ~isempty(r.pulse)
+            c = r.pulse;
+            p.pulse.freqHz = getf(c,'frequencyHz',100e3);
+            p.pulse.PRI = getf(c,'repSec',p.duration);
+            p.pulse.tau = getf(c,'pulseWidthSec',5e-4);
+            p.pulse.ph0 = deg2rad(getf(c,'phaseDeg',0));
+        else
+            error('For type "continuous_pulse", the "pulse" block is required.');
+        end
+        % Quick checks for continuous pulse
+        if p.pulse.tau > p.pulse.PRI
+            warning('pulseWidthSec (%.3g) > repSec (%.3g); clamping to PRI.',p.pulse.tau,p.pulse.PRI);
+            p.pulse.tau = p.pulse.PRI;
+        end
+        if p.pulse.freqHz >= p.fs/2
+            warning('pulse.frequencyHz >= fs/2 (Nyquist). You may get aliasing.');
+        end
+
+    case 'fm_linear'
+        if isfield(r,'linear') && ~isempty(r.linear)
+            c = r.linear;
+            p.linear.center_freq = getf(c,'center');
+            p.linear.bw = getf(c,'bandwidth');
+            p.linear.chirpDur = getf(c,'chirp_durSec');
+        else
+            error('For type "fm_linear" the "linear" block is required.');
+        end
+        %quick checks for fm linear
+        if p.linear.bw/2 >= p.linear.center_freq
+            warning('p.linear.bw is greater than center frequency');
+        end
+        if p.linear.center_freq + (p.linear.bw)/2 >= p.fs/2
+            warning('Chirp edge frequency >= fs/2. you may get aliasing.');
+        end
+
+    case 'fm_log'
+        if isfield(r,'log') && ~isempty(r.log)
+            c = r.log;
+            p.log.center_freq = getf(c,'center');
+            p.log.bw = getf(c,'bandwidth');
+            p.log.chirpDur = getf(c,'chirp_durSec');
+        else
+            error('For type "fm.log" the "log" block is required.');
+        end
+        if p.log.bw/2 >= p.log.center_freq
+            warning('p.log.bw is greater than center frequency');
+        end
+        if p.log.center_freq + (p.log.bw)/2 >= p.fs/2
+            warning("aliasing will occur");
+        end
+
+    case 'step_frequency'
+        if isfield(r,'step') && ~isempty(r.step)
+            c = r.step;
+            p.step.f0 = getf(c,'f0');
+            p.step.StepSize = getf(c,'step_size'); % in Hz
+            p.step.Nsteps = getf(c,'Nsteps');
+            p.step.ph0 = deg2rad(getf(c,'phaseDeg',0));
+            p.step.stepDur = getf(c,'step_duration');
+        else
+            error('For type "step_frequency" the "step" block is required.');
+        end
+        if p.step.f0 >= p.fs/2
+            warning("aliasing will occur");
+        end
+
+    case 'phase_coded'
+        if isfield(r,'phase') && ~isempty(r.phase)
+            c = r.phase;
+            p.phase.chipWidth = getf(c,'chipWidth');
+            p.phase.sequence = getf(c,'sequence');
+            p.phase.startph = (pi/180) * getf(c,'startPhaseDeg',0);
+            p.phase.repeat = getf(c,'repeat',true);
+        else
+            error('For type "phase-coded", the "phase" block is required.');
+        end
+        % checks
+        if isempty(p.phase.chipWidth) ||  p.phase.chipWidth <= 0
+            error('phase.chipRate must be a positive scalar.');
+        end
+        if isempty(p.phase.sequence)
+            error('phase.sequence must be a non-empty vector of +/-1 values.');
+        end
+        seq = p.phase.sequence(:);
+        if any(~ismember(seq,[-1,1]))
+            warning('phase.sequence contains values other than +/-1; applying sign().');
+            p.phase.sequence = sign(seq);
+            p.phase.sequence(p.phase.sequence == 0) = 1; % maps any 0 to +1
+        end
+
+    otherwise
+        error('Unsupported type: %s',p.type);
+end  % for switch case
+
+end
+
