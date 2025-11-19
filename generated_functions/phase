@@ -1,0 +1,25 @@
+function iq = phase_coded(tt,A,chipWidth,seq,ph0,repeat)
+% tt: column vector time in seconds, A: amplitude, chipWidth: seconds per chip
+% seq: vector of +1/-1, ph0: initial phase in radians, repeat: true/false
+
+% Ensure column vector
+tt = tt(:);
+
+N = length(seq);
+% Compute phase offset for each chip: +1->0, -1->pi
+chipPhases = ph0 + (1 - seq(:))/2*pi; 
+
+% Determine chip index for each time sample
+k = floor(tt/chipWidth) + 1;
+
+iq = zeros(size(tt)); 
+
+if repeat
+    kmod = mod(k-1, N) + 1;
+    iq = A * exp(1j * chipPhases(kmod));
+else
+    valid = k >= 1 & k <= N;
+    iq(valid) = A * exp(1j * chipPhases(k(valid)));
+    % outside sequence remains zero
+end
+end
