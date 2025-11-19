@@ -1,0 +1,23 @@
+function iq = fm_log(tt,A,k,f0,f1,T)
+% tt: seconds (column). A: amplitude. k=log(f1/f0). f0: start Hz. f1: end Hz. T: sweep duration (s).
+% Returns complex IQ samples of a log-FM waveform.
+
+% preallocate
+iq = zeros(size(tt));
+
+% phase vector
+phi = zeros(size(tt));
+
+% indices
+idx0 = tt < 0;
+idx1 = tt >= 0 & tt <= T;
+idx2 = tt > T;
+
+% phase for 0 <= t <= T
+phi(idx1) = 2*pi * f0 * T / k .* (exp(k * tt(idx1) / T) - 1);
+
+% phase for t > T (hold at f1)
+phi(idx2) = 2*pi * f0 * T / k * (exp(k) - 1) + 2*pi * f1 * (tt(idx2) - T);
+
+% IQ signal
+iq = A * exp(1j * phi);
