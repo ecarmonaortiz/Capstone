@@ -1,0 +1,11 @@
+function iq = fm_linear(tt,A,W,f0,T)
+f1 = f0 + W*T;
+phi = zeros(size(tt));
+idx1 = tt <= T;
+t1 = tt(idx1);
+phi(idx1) = 2*pi*(f0.*t1 + 0.5*W.*t1.^2);
+idx2 = tt > T;
+t2 = tt(idx2);
+phi_T = 2*pi*(f0*T + 0.5*W*T^2);
+phi(idx2) = phi_T + 2*pi*f1*(t2 - T);
+iq = A .* exp(1j*phi);
