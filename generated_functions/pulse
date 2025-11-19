@@ -1,0 +1,5 @@
+function iq = continuous_pulse(t,A,w,ph,PRI,tau)
+tmod = mod(t,PRI);
+mask = tmod<tau;
+iq = A.*exp(1j*(w.*t+ph)).*mask;
+end
