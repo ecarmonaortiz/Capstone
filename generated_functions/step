@@ -1,0 +1,24 @@
+function iq = step_frequency(tt,A,f0,df,N,ph0,stepDur)
+% tt: seconds (column). A: amplitude. f0: starting Hz. df: change in frequency.
+% N: number of steps. ph0: initial phase (rad). stepDur: step duration (s).
+
+% Ensure column vector
+tt = tt(:);
+
+% Compute step index k (0-based), cap at N-1
+k = floor(tt/stepDur);
+k(k < 0) = 0;
+k(k > N-1) = N-1;
+
+% Instantaneous frequency for each time
+fk = f0 + k*df;
+
+% Phase prefix for completed steps
+phi_prefix = 2*pi * (k*f0 + df*(k.*(k-1)/2)) * stepDur;
+
+% Phase within current step
+phi = ph0 + phi_prefix + 2*pi * fk .* (tt - k*stepDur);
+
+% IQ samples
+iq = A * exp(1j*phi);
+end
